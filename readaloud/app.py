@@ -19,11 +19,13 @@ Config (env vars or .env next to this file):
 Run:  python app.py        then open  http://localhost:8765
 """
 
+import io
 import json
 import os
 import sys
+import wave
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
 
 try:
     import requests
@@ -58,6 +60,16 @@ load_dotenv(os.path.expanduser("~/.secrets.local"))  # your existing secrets fil
 API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 MODEL = os.environ.get("READALOUD_MODEL", "google/gemini-2.5-flash")
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
+TTS_MODEL = os.environ.get(
+    "READALOUD_TTS_MODEL", "heygen/heygen-voice-1-turbo:free")
+TTS_VOICE = os.environ.get("READALOUD_VOICE", "gareth").strip().lower()
+TTS_ENDPOINT = "https://openrouter.ai/api/v1/audio/speech"
+MODELS_ENDPOINT = "https://openrouter.ai/api/v1/models?output_modalities=speech"
+TTS_MAX_CHARACTERS = 5000
+DEFAULT_TTS_VOICES = [
+    "nadine", "tabitha", "bram", "gareth", "noelle",
+    "meredith", "sabrina", "lucian", "weston", "vincent",
+]
 
 SYSTEM_PROMPT = """\
 You are ReadAloud, a speech preparation assistant. The user gives you text
@@ -137,6 +149,96 @@ def data_url(mime, data):
 @app.route("/")
 def index():
     return render_template("index.html", model=MODEL, has_key=bool(API_KEY))
+
+
+def get_tts_voices():
+    try:
+        response = requests.get(MODELS_ENDPOINT, timeout=10)
+        response.raise_for_status()
+        metadata = response.json()
+        models = metadata.get("data", []) if isinstance(metadata, dict) else []
+        model = next((item for item in models if item.get("id") == TTS_MODEL), {})
+        voices = model.get("supported_voices", [])
+        if isinstance(voices, list) and voices:
+            return [voice for voice in voices if isinstance(voice, str)]
+    except (requests.RequestException, ValueError):
+        pass
+    return DEFAULT_TTS_VOICES
+
+
+@app.route("/api/tts-config")
+def tts_config():
+    voices = get_tts_voices()
+    default_voice = TTS_VOICE if TTS_VOICE in voices else "gareth"
+    if default_voice not in voices and voices:
+        default_voice = voices[0]
+    return jsonify(model=TTS_MODEL, voice=default_voice, voices=voices)
+
+
+@app.route("/api/tts", methods=["POST"])
+def text_to_speech():
+    if not API_KEY:
+        return jsonify(error="OPENROUTER_API_KEY is not set. "
+                       "Put it in .env or ~/.secrets.local."), 400
+
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        return jsonify(error="A JSON object is required."), 400
+    text = body.get("text", "")
+    voice = body.get("voice", TTS_VOICE)
+    if not isinstance(text, str) or not text.strip():
+        return jsonify(error="Text to speak is required."), 400
+    text = text.strip()
+    if len(text) > TTS_MAX_CHARACTERS:
+        return jsonify(
+            error=f"Text must be {TTS_MAX_CHARACTERS} characters or fewer."), 400
+    if (not isinstance(voice, str) or not voice or len(voice) > 64
+            or not voice.replace("-", "").replace("_", "").isalnum()):
+        return jsonify(error="Invalid voice name."), 400
+
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "http://localhost",
+        "X-Title": "ReadAloud",
+    }
+    payload = {
+        "model": TTS_MODEL,
+        "input": text,
+        "voice": voice,
+        "response_format": "pcm",
+    }
+
+    try:
+        response = requests.post(
+            TTS_ENDPOINT, headers=headers, json=payload, timeout=120)
+    except requests.RequestException as exc:
+        return jsonify(error=f"Network error talking to OpenRouter: {exc}"), 502
+
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("error", {}).get(
+                "message", response.text[:300])
+        except (ValueError, AttributeError):
+            detail = response.text[:300]
+        return (
+            jsonify(error=f"OpenRouter {response.status_code}: {detail}"),
+            response.status_code,
+        )
+
+    pcm = response.content
+    if not pcm or len(pcm) % 2:
+        return jsonify(error="OpenRouter returned invalid PCM audio."), 502
+
+    audio = io.BytesIO()
+    with wave.open(audio, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(44100)
+        wav.writeframes(pcm)
+    return Response(
+        audio.getvalue(), mimetype="audio/wav",
+        headers={"Cache-Control": "no-store"})
 
 
 @app.route("/api/speak", methods=["POST"])
