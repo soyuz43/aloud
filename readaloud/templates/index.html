@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReadAloud</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px; min-height: 100vh;
+    background: #12141a; color: #e6e8ee;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .wrap { width: 100%; max-width: 900px; }
+  h1 { font-size: 20px; margin: 0 0 4px; color: #7ee787; }
+  .sub { font-size: 12px; color: #8b93a5; margin-bottom: 16px; }
+  textarea {
+    width: 100%; min-height: 200px; resize: vertical;
+    background: #1b1f28; color: #e6e8ee; border: 1px solid #2c3242;
+    border-radius: 8px; padding: 12px; font-size: 15px; line-height: 1.5;
+  }
+  textarea:focus { outline: none; border-color: #7ee787; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+  button, select, label.filebtn {
+    background: #232837; color: #e6e8ee; border: 1px solid #2c3242;
+    border-radius: 8px; padding: 9px 14px; font-size: 14px; cursor: pointer;
+  }
+  button:hover, label.filebtn:hover { border-color: #7ee787; }
+  button.primary { background: #238636; border-color: #2ea043; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: wait; }
+  input[type=range] { accent-color: #7ee787; }
+  .fileinfo { font-size: 12px; color: #8b93a5; }
+  #scriptBox {
+    margin-top: 18px; background: #1b1f28; border: 1px solid #2c3242;
+    border-radius: 8px; padding: 14px; font-size: 16px; line-height: 1.6;
+    white-space: pre-wrap; display: none;
+  }
+  #status { font-size: 13px; color: #d29922; min-height: 18px; margin-top: 8px; }
+  #status.error { color: #f85149; }
+  .drop { border-style: dashed; transition: border-color .15s; }
+  .drop.over { border-color: #7ee787; }
+  .small { font-size: 12px; color: #8b93a5; }
+  progress { width: 100%; height: 6px; margin-top: 8px; display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🗣️ ReadAloud</h1>
+  <div class="sub">Paste text or drop an image/PDF → model cleans it → browser speaks it. Model: <b>{{ model }}</b></div>
+
+  {% if not has_key %}
+  <div class="sub" style="color:#f85149">⚠ OPENROUTER_API_KEY not found — set it in readaloud/.env or ~/.secrets.local and restart.</div>
+  {% endif %}
+
+  <textarea id="input" class="drop" placeholder="Paste your text here… (or drop an image / PDF right onto this box)"></textarea>
+
+  <div class="row">
+    <button id="go" class="primary">▶ Prepare &amp; Speak</button>
+    <label class="filebtn">📎 Attach file
+      <input type="file" id="file" accept="image/*,.pdf,.txt,.md" hidden>
+    </label>
+    <span id="fileinfo" class="fileinfo"></span>
+    <button id="clip" title="Paste from clipboard via permission API">📋 Paste</button>
+  </div>
+
+  <div class="row">
+    <span class="small">Voice</span>
+    <select id="voice" style="max-width: 320px"></select>
+    <span class="small">Rate</span>
+    <input type="range" id="rate" min="0.5" max="2" step="0.1" value="1" style="width:110px">
+    <span class="small" id="rateval">1.0×</span>
+    <span class="small">Pitch</span>
+    <input type="range" id="pitch" min="0.5" max="1.5" step="0.1" value="1" style="width:90px">
+  </div>
+
+  <div class="row">
+    <button id="pause">⏸ Pause</button>
+    <button id="resume">▶ Resume</button>
+    <button id="stop">⏹ Stop</button>
+    <button id="skipPrev">⏮ Prev chunk</button>
+    <button id="skipNext">⏭ Next chunk</button>
+    <span class="small" id="chunkpos"></span>
+  </div>
+
+  <progress id="prog" indeterminate></progress>
+  <div id="status"></div>
+  <div id="scriptBox"></div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let attached = null;          // File object
+let chunks = [];              // speakable sentences
+let chunkIdx = 0;
+let voices = [];
+
+// ---------------- voices ----------------
+function loadVoices() {
+  voices = speechSynthesis.getVoices();
+  const sel = $("voice");
+  sel.innerHTML = "";
+  // English voices first, then the rest
+  const sorted = [...voices].sort((a, b) =>
+    (/^en/i.test(a.lang) ? 0 : 1) - (/^en/i.test(b.lang) ? 0 : 1) ||
+    a.name.localeCompare(b.name));
+  for (const v of sorted) {
+    const opt = document.createElement("option");
+    opt.value = v.name;
+    opt.textContent = `${v.name} (${v.lang})`;
+    sel.appendChild(opt);
+  }
+  const prefer = sorted.find(v => /en[-_]US.*(Natural|Online|Google)/i.test(v.name))
+              || sorted.find(v => /^en/i.test(v.lang));
+  if (prefer) sel.value = prefer.name;
+}
+speechSynthesis.onvoiceschanged = loadVoices;
+loadVoices();
+
+$("rate").oninput = () => $("rateval").textContent = Number($("rate").value).toFixed(1) + "×";
+
+// ---------------- drag & drop ----------------
+const ta = $("input");
+["dragover","dragenter"].forEach(ev => ta.addEventListener(ev, e => {
+  e.preventDefault(); ta.classList.add("over");
+}));
+["dragleave","drop"].forEach(ev => ta.addEventListener(ev, e => {
+  e.preventDefault(); ta.classList.remove("over");
+}));
+ta.addEventListener("drop", e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) setFile(f);
+});
+
+$("file").onchange = (e) => { if (e.target.files[0]) setFile(e.target.files[0]); };
+function setFile(f) {
+  attached = f;
+  $("fileinfo").textContent = `📄 ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
+}
+
+$("clip").onclick = async () => {
+  try {
+    const txt = await navigator.clipboard.readText();
+    if (txt) ta.value += (ta.value ? "\n" : "") + txt;
+    ta.focus();
+  } catch { setStatus("Clipboard read blocked by browser — use Ctrl+V in the box.", true); }
+};
+
+// ---------------- status ----------------
+function setStatus(msg, isError) {
+  const s = $("status");
+  s.textContent = msg || "";
+  s.className = isError ? "error" : "";
+}
+
+// ---------------- backend call ----------------
+$("go").onclick = async () => {
+  const text = ta.value.trim();
+  if (!text && !attached) { setStatus("Nothing to read — paste text or attach a file.", true); return; }
+
+  stopSpeech();
+  $("go").disabled = true;
+  $("prog").style.display = "block";
+  setStatus("Sending to {{ model }}…");
+
+  const fd = new FormData();
+  fd.append("text", text);
+  if (attached) fd.append("file", attached);
+
+  try {
+    const r = await fetch("/api/speak", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+
+    $("scriptBox").style.display = "block";
+    $("scriptBox").textContent = j.script;
+    chunks = splitSentences(j.script);
+    chunkIdx = 0;
+    setStatus(`Speaking ${chunks.length} chunks (${j.model}).`);
+    speakFrom(0);
+  } catch (err) {
+    setStatus("Error: " + err.message, true);
+  } finally {
+    $("go").disabled = false;
+    $("prog").style.display = "none";
+  }
+};
+
+// ---------------- speech ----------------
+function splitSentences(t) {
+  // split on sentence ends, keep paragraphs readable
+  const parts = t.replace(/\s+/g, " ")
+                 .match(/[^.!?…]+[.!?…]*\s*/g) || [t];
+  // merge tiny fragments into neighbours so prosody sounds natural
+  const out = [];
+  let buf = "";
+  for (let p of parts.map(s => s.trim())) {
+    if (!p) continue;
+    buf = buf ? buf + " " + p : p;
+    if (buf.length > 40) { out.push(buf); buf = ""; }
+  }
+  if (buf) { if (out.length && buf.length < 25) out[out.length-1] += " " + buf; else out.push(buf); }
+  return out;
+}
+
+function currentVoice() {
+  return voices.find(v => v.name === $("voice").value) || null;
+}
+
+function speakFrom(i) {
+  if (i >= chunks.length) { chunkPos(); return; }
+  chunkIdx = i;
+  chunkPos();
+  const u = new SpeechSynthesisUtterance(chunks[i]);
+  const v = currentVoice();
+  if (v) { u.voice = v; u.lang = v.lang; }
+  u.rate = Number($("rate").value);
+  u.pitch = Number($("pitch").value);
+  u.onend = () => { if (!paused) speakFrom(chunkIdx + 1); };
+  u.onerror = (e) => { if (e.error !== "interrupted" && e.error !== "canceled")
+                        setStatus("Speech error: " + e.error, true); };
+  speechSynthesis.speak(u);
+}
+
+let paused = false;
+$("pause").onclick = () => { paused = true; speechSynthesis.pause(); };
+$("resume").onclick = () => {
+  if (paused) { paused = false; speechSynthesis.resume(); }
+  else speakFrom(chunkIdx);       // resume from current chunk head
+};
+$("stop").onclick = () => { paused = false; stopSpeech(); };
+$("skipNext").onclick = () => { stopSpeech(); paused = false; speakFrom(Math.min(chunkIdx + 1, chunks.length - 1)); };
+$("skipPrev").onclick = () => { stopSpeech(); paused = false; speakFrom(Math.max(chunkIdx - 1, 0)); };
+
+function stopSpeech() { paused = false; speechSynthesis.cancel(); }
+function chunkPos() {
+  $("chunkpos").textContent = chunks.length ? `${Math.min(chunkIdx+1, chunks.length)} / ${chunks.length}` : "";
+}
+
+// Chrome bug: long speech stops after ~15s unless you nudge it
+setInterval(() => {
+  if (!speechSynthesis.paused && speechSynthesis.speaking) {
+    speechSynthesis.pause(); speechSynthesis.resume();
+  }
+}, 10000);
+</script>
+</body>
+</html>
