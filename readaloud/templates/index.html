@@ -15,7 +15,9 @@
   }
   .wrap { width: 100%; max-width: 900px; }
   h1 { font-size: 20px; margin: 0 0 4px; color: #7ee787; }
-  .sub { font-size: 12px; color: #8b93a5; margin-bottom: 16px; }
+  .sub { font-size: 12px; color: #8b93a5; margin-bottom: 10px; }
+  .sub b { color: #c9d1e0; font-weight: 600; }
+  .tiny { font-size: 11px; color: #6b7385; }
   textarea {
     width: 100%; min-height: 200px; resize: vertical;
     background: #1b1f28; color: #e6e8ee; border: 1px solid #2c3242;
@@ -30,6 +32,7 @@
   button:hover, label.filebtn:hover { border-color: #7ee787; }
   button.primary { background: #238636; border-color: #2ea043; font-weight: 600; }
   button.primary:disabled { opacity: .5; cursor: wait; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
   input[type=range] { accent-color: #7ee787; }
   .fileinfo { font-size: 12px; color: #8b93a5; }
   #scriptBox {
@@ -39,100 +42,143 @@
   }
   #status { font-size: 13px; color: #d29922; min-height: 18px; margin-top: 8px; }
   #status.error { color: #f85149; }
+  #status.ok { color: #7ee787; }
   .drop { border-style: dashed; transition: border-color .15s; }
   .drop.over { border-color: #7ee787; }
   .small { font-size: 12px; color: #8b93a5; }
   progress { width: 100%; height: 6px; margin-top: 8px; display: none; }
+  #playerBox {
+    margin-top: 16px; padding: 14px; background: #171b23;
+    border: 1px solid #2c3242; border-radius: 10px; display: none;
+  }
+  #playerBox.ready { display: block; }
+  #playerBox audio { width: 100%; margin-bottom: 8px; }
+  #ttsBar { flex: 1; min-width: 160px; margin-top: 0; display: block; }
+  a.download { color: #7ee787; font-size: 12px; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>🗣️ ReadAloud</h1>
-  <div class="sub">Paste text or drop an image/PDF → model cleans it → HeyGen speaks it. Model: <b>{{ model }}</b></div>
+  <h1>&#128483; ReadAloud</h1>
+  <div class="sub">
+    Paste text or drop an image/PDF &rarr; it gets cleaned up &rarr;
+    <b id="speechModelName">{{ tts_model }}</b> reads it aloud.
+  </div>
+  <div class="sub tiny">Text preparation: <b>{{ model }}</b></div>
 
   {% if not has_key %}
-  <div class="sub" style="color:#f85149">⚠ OPENROUTER_API_KEY not found — set it in readaloud/.env or ~/.secrets.local and restart.</div>
+  <div class="sub" style="color:#f85149">&#9888; OPENROUTER_API_KEY not found &mdash; set it in readaloud/.env or ~/.secrets.local and restart.</div>
   {% endif %}
 
-  <textarea id="input" class="drop" placeholder="Paste your text here… (or drop an image / PDF right onto this box)"></textarea>
+  <textarea id="input" class="drop" placeholder="Paste your text here&hellip; (or drop an image / PDF right onto this box)"></textarea>
 
   <div class="row">
-    <button id="go" class="primary">▶ Prepare &amp; Speak</button>
-    <label class="filebtn">📎 Attach file
+    <button id="go" class="primary">&#9654; Prepare &amp; Read Aloud</button>
+    <label class="filebtn">&#128206; Attach file
       <input type="file" id="file" accept="image/*,.pdf,.txt,.md" hidden>
     </label>
     <span id="fileinfo" class="fileinfo"></span>
-    <button id="clip" title="Paste from clipboard via permission API">📋 Paste</button>
+    <button id="clip" title="Paste from clipboard via permission API">&#128203; Paste</button>
   </div>
 
   <div class="row">
-    <label class="small" for="engine">Speech engine</label>
+    <label class="small" for="engine">Voice engine</label>
     <select id="engine">
-      <option value="heygen" selected>HeyGen Voice Turbo — real audio</option>
-      <option value="browser">Browser voices</option>
+      <option value="heygen" selected>Server speech (real audio)</option>
+      <option value="browser">Browser voices (legacy)</option>
     </select>
-    <label class="small" id="ttsVoiceLabel" for="ttsVoice">HeyGen voice</label>
+    <label class="small" id="ttsVoiceLabel" for="ttsVoice">Voice</label>
     <select id="ttsVoice" style="max-width: 220px">
       <option value="gareth" selected>Gareth</option>
     </select>
-    <button id="testVoice">▶ Test voice</button>
+    <button id="testVoice">&#9654; Test voice</button>
   </div>
 
   <div class="row" id="browserControls">
-    <span class="small">Voice</span>
+    <span class="small">Browser voice</span>
     <select id="voice" style="max-width: 320px"></select>
     <span class="small">Rate</span>
     <input type="range" id="rate" min="0.5" max="2" step="0.1" value="1" style="width:110px">
-    <span class="small" id="rateval">1.0×</span>
+    <span class="small" id="rateval">1.0&times;</span>
     <span class="small">Pitch</span>
     <input type="range" id="pitch" min="0.5" max="1.5" step="0.1" value="1" style="width:90px">
   </div>
 
-  <div class="row">
-    <button id="pause">⏸ Pause</button>
-    <button id="resume">▶ Resume</button>
-    <button id="stop">⏹ Stop</button>
-    <button id="skipPrev">⏮ Prev chunk</button>
-    <button id="skipNext">⏭ Next chunk</button>
-    <span class="small" id="chunkpos"></span>
+  <div id="playerBox">
+    <div class="row" style="margin-top:0">
+      <button id="pause">&#10073;&#65039; Pause</button>
+      <button id="resume">&#9654; Resume</button>
+      <button id="stop">&#9639; Stop</button>
+      <button id="skipPrev">&#9198; Prev chunk</button>
+      <button id="skipNext">&#9197; Next chunk</button>
+      <span class="small" id="chunkpos"></span>
+      <a class="download" id="download" download="readaloud.wav">Download .wav</a>
+    </div>
+    <audio id="audioPlayer" controls preload="auto"></audio>
   </div>
 
-  <audio id="audioPlayer" controls hidden style="width:100%; margin-top:10px"></audio>
-
   <progress id="prog" indeterminate></progress>
+  <div class="row hidden" id="ttsProgressRow">
+    <progress id="ttsBar" max="1" value="0"></progress>
+    <span class="small" id="ttsProgressLabel"></span>
+  </div>
   <div id="status"></div>
   <div id="scriptBox"></div>
 </div>
 
 <script>
 const $ = (id) => document.getElementById(id);
-let attached = null;          // File object
-let chunks = [];              // speakable sentences
+const ta = $("input");
+const player = $("audioPlayer");
+
+let attached = null;         // File object
+let chunks = [];             // browser-speech sentences (legacy engine)
 let chunkIdx = 0;
-let voices = [];
-let ttsChunks = [];
-let ttsChunkIdx = 0;
+let voices = [];             // browser voices
 let preparedScript = "";
-let audioUrl = null;
-let pendingAudioBlob = null;
-let playbackGeneration = 0;
+let chunkTimes = [];         // start time of each chunk in the merged file
+let chunkTotal = 0;
+let currentChunk = 0;
+let audioReady = false;
+let playbackGeneration = 0;  // invalidates in-flight async work
 let previewMode = false;
 let paused = false;
 
-function updateEngineUI() {
-  const heygen = $("engine").value === "heygen";
-  $("ttsVoiceLabel").style.display = heygen ? "inline" : "none";
-  $("ttsVoice").style.display = heygen ? "inline-block" : "none";
-  $("testVoice").style.display = heygen ? "inline-block" : "none";
-  $("browserControls").style.display = heygen ? "none" : "flex";
-  $("audioPlayer").hidden = !heygen || !$("audioPlayer").src;
+// ---------------------------------------------------------------- status
+function setStatus(msg, kind) {
+  const s = $("status");
+  s.textContent = msg || "";
+  s.className = kind === "error" ? "error" : (kind === "ok" ? "ok" : "");
 }
 
+function showProgress(on) { $("prog").style.display = on ? "block" : "none"; }
+
+function showTtsProgress(on) {
+  $("ttsProgressRow").classList.toggle("hidden", !on);
+}
+
+// ---------------------------------------------------------------- engine UI
+function usingServerVoice() { return $("engine").value === "heygen"; }
+
+function updateEngineUI() {
+  const server = usingServerVoice();
+  $("ttsVoiceLabel").style.display = server ? "inline" : "none";
+  $("ttsVoice").classList.toggle("hidden", !server);
+  $("testVoice").classList.toggle("hidden", !server);
+  $("browserControls").classList.toggle("hidden", server);
+  if (!server) hidePlayer();
+}
+
+// ---------------------------------------------------------------- tts config
 async function loadTtsConfig() {
   try {
     const response = await fetch("/api/tts-config");
     if (!response.ok) return;
     const config = await response.json();
+    if (config.model_name) {
+      $("speechModelName").textContent = config.model_name;
+    }
     if (!Array.isArray(config.voices) || !config.voices.length) return;
     const select = $("ttsVoice");
     select.innerHTML = "";
@@ -147,12 +193,11 @@ async function loadTtsConfig() {
   }
 }
 
-// ---------------- voices ----------------
+// ---------------------------------------------------------------- voices
 function loadVoices() {
   voices = speechSynthesis.getVoices();
   const sel = $("voice");
   sel.innerHTML = "";
-  // English voices first, then the rest
   const sorted = [...voices].sort((a, b) =>
     (/^en/i.test(a.lang) ? 0 : 1) - (/^en/i.test(b.lang) ? 0 : 1) ||
     a.name.localeCompare(b.name));
@@ -176,10 +221,9 @@ $("engine").onchange = () => {
   updateEngineUI();
 };
 
-$("rate").oninput = () => $("rateval").textContent = Number($("rate").value).toFixed(1) + "×";
+$("rate").oninput = () => $("rateval").textContent = Number($("rate").value).toFixed(1) + "\u00d7";
 
-// ---------------- drag & drop ----------------
-const ta = $("input");
+// ---------------------------------------------------------------- drag & drop
 ["dragover","dragenter"].forEach(ev => ta.addEventListener(ev, e => {
   e.preventDefault(); ta.classList.add("over");
 }));
@@ -194,7 +238,7 @@ ta.addEventListener("drop", e => {
 $("file").onchange = (e) => { if (e.target.files[0]) setFile(e.target.files[0]); };
 function setFile(f) {
   attached = f;
-  $("fileinfo").textContent = `📄 ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
+  $("fileinfo").textContent = `\ud83d\udcc4 ${f.name} (${(f.size/1024).toFixed(0)} KB)`;
 }
 
 $("clip").onclick = async () => {
@@ -202,25 +246,24 @@ $("clip").onclick = async () => {
     const txt = await navigator.clipboard.readText();
     if (txt) ta.value += (ta.value ? "\n" : "") + txt;
     ta.focus();
-  } catch { setStatus("Clipboard read blocked by browser — use Ctrl+V in the box.", true); }
+  } catch { setStatus("Clipboard read blocked by browser \u2014 use Ctrl+V in the box.", "error"); }
 };
 
-// ---------------- status ----------------
-function setStatus(msg, isError) {
-  const s = $("status");
-  s.textContent = msg || "";
-  s.className = isError ? "error" : "";
-}
-
-// ---------------- backend call ----------------
+// ---------------------------------------------------------------- prepare
 $("go").onclick = async () => {
   const text = ta.value.trim();
-  if (!text && !attached) { setStatus("Nothing to read — paste text or attach a file.", true); return; }
+  if (!text && !attached) {
+    setStatus("Nothing to read \u2014 paste text or attach a file.", "error");
+    return;
+  }
 
-  stopSpeech();
+  const generation = ++playbackGeneration;
+  stopPlayback();
+  hidePlayer();
   $("go").disabled = true;
-  $("prog").style.display = "block";
-  setStatus("Sending to {{ model }}…");
+  showProgress(true);
+  showTtsProgress(false);
+  setStatus("Preparing the text\u2026");
 
   const fd = new FormData();
   fd.append("text", text);
@@ -230,36 +273,228 @@ $("go").onclick = async () => {
     const r = await fetch("/api/speak", { method: "POST", body: fd });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+    if (generation !== playbackGeneration) return;
 
     $("scriptBox").style.display = "block";
     $("scriptBox").textContent = j.script;
     preparedScript = j.script;
     chunks = splitSentences(j.script);
-    ttsChunks = splitTtsText(j.script);
     chunkIdx = 0;
-    ttsChunkIdx = 0;
-    paused = false;
-    if ($("engine").value === "heygen") {
-      setStatus(`Preparing ${ttsChunks.length} audio chunk(s) with HeyGen.`);
-      playTtsFrom(0);
-    } else {
-      setStatus(`Speaking ${chunks.length} chunks (${j.model}).`);
-      speakFrom(0);
+
+    if (j.truncated) {
+      setStatus("The text-prep model hit its output limit \u2014 the script may be incomplete.", "error");
     }
+
+    if (!usingServerVoice()) {
+      showProgress(false);
+      setStatus(`Speaking ${chunks.length} chunks with browser voices.`);
+      speakFrom(0);
+      return;
+    }
+
+    setStatus("Preparing the script\u2026");
+    await generateAndPlay(j.script, generation);
   } catch (err) {
-    setStatus("Error: " + err.message, true);
+    if (generation !== playbackGeneration) return;
+    // If server speech fails, fall back to the browser voice engine rather
+    // than leaving the user with nothing.
+    if (usingServerVoice() && preparedScript) {
+      setStatus("Server speech failed (" + err.message + ") \u2014 falling back to browser voices.", "error");
+      $("engine").value = "browser";
+      updateEngineUI();
+      chunks = splitSentences(preparedScript);
+      speakFrom(0);
+    } else {
+      setStatus("Error: " + err.message, "error");
+    }
   } finally {
-    $("go").disabled = false;
-    $("prog").style.display = "none";
+    if (generation === playbackGeneration) {
+      $("go").disabled = false;
+      showProgress(false);
+      showTtsProgress(false);
+    }
   }
 };
 
-// ---------------- speech ----------------
+// ---------------------------------------------------------------- server TTS
+async function generateAndPlay(script, generation) {
+  const voice = $("ttsVoice").value || "gareth";
+  setStatus("Starting audio generation\u2026");
+
+  const start = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: script, voice }),
+  });
+  const startBody = await start.json().catch(() => ({}));
+  if (!start.ok) throw new Error(startBody.error || ("HTTP " + start.status));
+  if (generation !== playbackGeneration) return;
+
+  const total = startBody.chunks || 1;
+  chunkTotal = total;
+  showTtsProgress(true);
+  $("ttsBar").max = total;
+
+  const job = await pollJob(startBody.job_id, generation, (state) => {
+    const done = state.completed ?? state.done;
+    $("ttsBar").value = done;
+    $("ttsProgressLabel").textContent =
+      `Generating audio \u2014 ${done} of ${total} parts done`;
+  });
+  if (generation !== playbackGeneration) return;
+
+  chunkTimes = Array.isArray(job.times) ? job.times : [];
+  currentChunk = 0;
+  audioReady = true;
+
+  const url = `/api/tts/jobs/${startBody.job_id}/audio`;
+  player.src = url;
+  player.load();
+  $("download").href = url;
+  $("playerBox").classList.add("ready");
+  chunkPos();
+
+  const minutes = Math.floor(job.duration / 60);
+  const seconds = Math.floor(job.duration % 60);
+  await player.play().catch(() => {});
+  if (generation !== playbackGeneration) return;
+  setStatus(
+    `Playing ${total} stitched audio part(s) \u2014 ${minutes}:${String(seconds).padStart(2, "0")} total.`,
+    "ok");
+}
+
+async function pollJob(jobId, generation, onProgress) {
+  for (;;) {
+    if (generation !== playbackGeneration) throw new Error("superseded");
+    const r = await fetch(`/api/tts/jobs/${jobId}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const state = await r.json();
+    if (generation !== playbackGeneration) throw new Error("superseded");
+    if (state.state === "error") {
+      throw new Error(state.error || "Audio generation failed.");
+    }
+    if (state.ready) return state;
+    if (onProgress) onProgress(state);
+    await new Promise(resolve => setTimeout(resolve, 700));
+  }
+}
+
+// ---------------------------------------------------------------- player
+function hidePlayer() {
+  audioReady = false;
+  chunkTimes = [];
+  $("playerBox").classList.remove("ready");
+  $("download").removeAttribute("href");
+  player.removeAttribute("src");
+  player.load();
+}
+
+function stopPlayback() {
+  paused = false;
+  previewMode = false;
+  speechSynthesis.cancel();
+  player.pause();
+  player.currentTime = 0;
+}
+
+function stopSpeech() {
+  playbackGeneration += 1;
+  stopPlayback();
+  updateEngineUI();
+}
+
+player.addEventListener("ended", () => {
+  if (previewMode) {
+    setStatus("Voice preview complete.");
+    previewMode = false;
+    return;
+  }
+  setStatus("Playback complete.", "ok");
+  chunkPos();
+});
+
+player.addEventListener("timeupdate", () => {
+  if (!chunkTimes.length) return;
+  let index = 0;
+  for (let i = 0; i < chunkTimes.length; i++) {
+    if (player.currentTime >= chunkTimes[i]) index = i;
+  }
+  if (index !== currentChunk) {
+    currentChunk = index;
+    chunkPos();
+  }
+});
+
+$("pause").onclick = () => {
+  paused = true;
+  if (usingServerVoice()) player.pause();
+  else speechSynthesis.pause();
+};
+
+$("resume").onclick = () => {
+  paused = false;
+  if (usingServerVoice()) {
+    if (!player.src) return;
+    player.play().catch(error =>
+      setStatus("Audio playback failed: " + error.message, "error"));
+  } else if (speechSynthesis.paused) {
+    speechSynthesis.resume();
+  } else {
+    speakFrom(chunkIdx);
+  }
+};
+
+$("stop").onclick = () => {
+  stopPlayback();
+  setStatus("Stopped.");
+};
+
+$("skipNext").onclick = () => {
+  if (usingServerVoice()) {
+    if (!chunkTimes.length) return;
+    const next = Math.min(currentChunk + 1, chunkTimes.length - 1);
+    player.currentTime = chunkTimes[next];
+    currentChunk = next;
+    chunkPos();
+    player.play().catch(() => {});
+  } else {
+    const next = Math.min(chunkIdx + 1, chunks.length - 1);
+    stopPlayback();
+    speakFrom(next);
+  }
+};
+
+$("skipPrev").onclick = () => {
+  if (usingServerVoice()) {
+    if (!chunkTimes.length) return;
+    const previous = Math.max(currentChunk - 1, 0);
+    player.currentTime = chunkTimes[previous];
+    currentChunk = previous;
+    chunkPos();
+    player.play().catch(() => {});
+  } else {
+    const previous = Math.max(chunkIdx - 1, 0);
+    stopPlayback();
+    speakFrom(previous);
+  }
+};
+
+function chunkPos() {
+  if (usingServerVoice()) {
+    $("chunkpos").textContent = chunkTotal
+      ? `${Math.min(currentChunk + 1, chunkTotal)} / ${chunkTotal}`
+      : "";
+  } else {
+    $("chunkpos").textContent = chunks.length
+      ? `${Math.min(chunkIdx + 1, chunks.length)} / ${chunks.length}`
+      : "";
+  }
+}
+
+// ---------------------------------------------------------------- browser speech (legacy)
 function splitSentences(t) {
-  // split on sentence ends, keep paragraphs readable
   const parts = t.replace(/\s+/g, " ")
-                 .match(/[^.!?…]+[.!?…]*\s*/g) || [t];
-  // merge tiny fragments into neighbours so prosody sounds natural
+                 .match(/[^.!?\u2026]+[.!?\u2026]*\s*/g) || [t];
   const out = [];
   let buf = "";
   for (let p of parts.map(s => s.trim())) {
@@ -275,94 +510,6 @@ function currentVoice() {
   return voices.find(v => v.name === $("voice").value) || null;
 }
 
-function splitTtsText(text) {
-  const words = text.match(/\S+/g) || [];
-  const result = [];
-  let current = "";
-  for (const word of words) {
-    for (let offset = 0; offset < word.length; offset += 4500) {
-      const part = word.slice(offset, offset + 4500);
-      if (current && current.length + part.length + 1 > 4500) {
-        result.push(current);
-        current = "";
-      }
-      current = current ? current + " " + part : part;
-      if (offset + 4500 < word.length) {
-        result.push(current);
-        current = "";
-      }
-    }
-  }
-  if (current) result.push(current);
-  return result;
-}
-
-async function requestTts(text, voice) {
-  const response = await fetch("/api/tts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, voice }),
-  });
-  if (!response.ok) {
-    let message = "HTTP " + response.status;
-    try { message = (await response.json()).error || message; } catch {}
-    throw new Error(message);
-  }
-  return response.blob();
-}
-
-function setAudioBlob(blob) {
-  const player = $("audioPlayer");
-  if (audioUrl) URL.revokeObjectURL(audioUrl);
-  audioUrl = URL.createObjectURL(blob);
-  player.src = audioUrl;
-  player.hidden = false;
-}
-
-async function startAudio(blob, generation, isPreview) {
-  setAudioBlob(blob);
-  const player = $("audioPlayer");
-  player.onended = () => {
-    if (isPreview) {
-      setStatus("Voice preview complete.");
-    } else if (!paused && generation === playbackGeneration) {
-      playTtsFrom(ttsChunkIdx + 1, generation);
-    }
-  };
-  await player.play();
-}
-
-async function playTtsFrom(index, generation = playbackGeneration) {
-  if (index >= ttsChunks.length) {
-    setStatus("HeyGen playback complete.");
-    return;
-  }
-  ttsChunkIdx = index;
-  chunkPos();
-  try {
-    setStatus(`Generating HeyGen audio (${index + 1}/${ttsChunks.length})…`);
-    const blob = await requestTts(ttsChunks[index], $("ttsVoice").value || "gareth");
-    if (generation !== playbackGeneration) return;
-    if (paused) {
-      pendingAudioBlob = blob;
-      return;
-    }
-    await startAudio(blob, generation, false);
-    setStatus(`Playing HeyGen audio (${index + 1}/${ttsChunks.length}).`);
-  } catch (error) {
-    if (generation !== playbackGeneration) return;
-    if (previewMode) {
-      setStatus("Voice test failed: " + error.message, true);
-      return;
-    }
-    $("engine").value = "browser";
-    updateEngineUI();
-    chunks = splitSentences(preparedScript);
-    setStatus("HeyGen failed; falling back to browser speech: " + error.message, true);
-    speakFrom(0);
-  }
-}
-
 function speakFrom(i) {
   if (i >= chunks.length) { chunkPos(); return; }
   chunkIdx = i;
@@ -375,103 +522,57 @@ function speakFrom(i) {
   utterance.onend = () => { if (!paused) speakFrom(chunkIdx + 1); };
   utterance.onerror = (event) => {
     if (event.error !== "interrupted" && event.error !== "canceled")
-      setStatus("Speech error: " + event.error, true);
+      setStatus("Speech error: " + event.error, "error");
   };
   speechSynthesis.speak(utterance);
 }
 
+// ---------------------------------------------------------------- voice test
 $("testVoice").onclick = async () => {
-  stopSpeech();
-  const generation = playbackGeneration;
+  const generation = ++playbackGeneration;
+  stopPlayback();
   previewMode = true;
   $("testVoice").disabled = true;
-  setStatus("Generating voice preview…");
+  showTtsProgress(true);
+  $("ttsBar").max = 1;
+  $("ttsBar").value = 0;
+  $("ttsProgressLabel").textContent = "Generating voice preview\u2026";
+  setStatus("Generating voice preview\u2026");
   try {
-    const blob = await requestTts(
-      "Hello! This is a preview of the selected ReadAloud voice.",
-      $("ttsVoice").value || "gareth");
+    const start = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: "Hello! This is a preview of the selected ReadAloud voice.",
+        voice: $("ttsVoice").value || "gareth",
+      }),
+    });
+    const startBody = await start.json().catch(() => ({}));
+    if (!start.ok) throw new Error(startBody.error || ("HTTP " + start.status));
+    const job = await pollJob(startBody.job_id, generation, (state) => {
+      $("ttsBar").value = state.completed ?? state.done;
+      $("ttsProgressLabel").textContent = "Generating voice preview\u2026";
+    });
     if (generation !== playbackGeneration) return;
-    await startAudio(blob, generation, true);
+    previewMode = true;
+    player.src = `/api/tts/jobs/${startBody.job_id}/audio`;
+    player.load();
+    await player.play().catch(() => {});
     setStatus("Playing voice preview.");
   } catch (error) {
     if (generation === playbackGeneration) {
       previewMode = false;
-      setStatus("Voice test failed: " + error.message, true);
+      setStatus("Voice test failed: " + error.message, "error");
     }
   } finally {
-    $("testVoice").disabled = false;
-  }
-};
-
-$("pause").onclick = () => {
-  paused = true;
-  if ($("engine").value === "heygen") $("audioPlayer").pause();
-  else speechSynthesis.pause();
-};
-$("resume").onclick = () => {
-  if ($("engine").value === "heygen") {
-    paused = false;
-    if (pendingAudioBlob) {
-      const blob = pendingAudioBlob;
-      pendingAudioBlob = null;
-      startAudio(blob, playbackGeneration, previewMode).catch(error =>
-        setStatus("Audio playback failed: " + error.message, true));
-    } else if ($("audioPlayer").ended) {
-      playTtsFrom(ttsChunkIdx + 1);
-    } else if ($("audioPlayer").src) {
-      $("audioPlayer").play().catch(error =>
-        setStatus("Audio playback failed: " + error.message, true));
-    } else {
-      playTtsFrom(ttsChunkIdx);
+    if (generation === playbackGeneration) {
+      $("testVoice").disabled = false;
+      showTtsProgress(false);
     }
-  } else if (paused) {
-    paused = false;
-    speechSynthesis.resume();
-  } else {
-    speakFrom(chunkIdx);
   }
 };
-$("stop").onclick = stopSpeech;
-$("skipNext").onclick = () => {
-  const next = $("engine").value === "heygen"
-    ? Math.min(ttsChunkIdx + 1, ttsChunks.length - 1)
-    : Math.min(chunkIdx + 1, chunks.length - 1);
-  stopSpeech();
-  if ($("engine").value === "heygen") playTtsFrom(next);
-  else speakFrom(next);
-};
-$("skipPrev").onclick = () => {
-  const previous = $("engine").value === "heygen"
-    ? Math.max(ttsChunkIdx - 1, 0)
-    : Math.max(chunkIdx - 1, 0);
-  stopSpeech();
-  if ($("engine").value === "heygen") playTtsFrom(previous);
-  else speakFrom(previous);
-};
 
-function stopSpeech() {
-  paused = false;
-  previewMode = false;
-  pendingAudioBlob = null;
-  playbackGeneration += 1;
-  speechSynthesis.cancel();
-  const player = $("audioPlayer");
-  player.pause();
-  player.removeAttribute("src");
-  player.load();
-  if (audioUrl) URL.revokeObjectURL(audioUrl);
-  audioUrl = null;
-  player.hidden = $("engine").value !== "heygen";
-}
-
-function chunkPos() {
-  const usingTts = $("engine").value === "heygen";
-  const total = usingTts ? ttsChunks.length : chunks.length;
-  const index = usingTts ? ttsChunkIdx : chunkIdx;
-  $("chunkpos").textContent = total ? `${Math.min(index + 1, total)} / ${total}` : "";
-}
-
-// Chrome bug: long speech stops after ~15s unless you nudge it
+// Chrome bug: long browser speech stops after ~15s unless you nudge it
 setInterval(() => {
   if (!speechSynthesis.paused && speechSynthesis.speaking) {
     speechSynthesis.pause(); speechSynthesis.resume();
