@@ -48,7 +48,7 @@
 <body>
 <div class="wrap">
   <h1>🗣️ ReadAloud</h1>
-  <div class="sub">Paste text or drop an image/PDF → model cleans it → browser speaks it. Model: <b>{{ model }}</b></div>
+  <div class="sub">Paste text or drop an image/PDF → model cleans it → HeyGen speaks it. Model: <b>{{ model }}</b></div>
 
   {% if not has_key %}
   <div class="sub" style="color:#f85149">⚠ OPENROUTER_API_KEY not found — set it in readaloud/.env or ~/.secrets.local and restart.</div>
@@ -66,6 +66,19 @@
   </div>
 
   <div class="row">
+    <label class="small" for="engine">Speech engine</label>
+    <select id="engine">
+      <option value="heygen" selected>HeyGen Voice Turbo — real audio</option>
+      <option value="browser">Browser voices</option>
+    </select>
+    <label class="small" id="ttsVoiceLabel" for="ttsVoice">HeyGen voice</label>
+    <select id="ttsVoice" style="max-width: 220px">
+      <option value="gareth" selected>Gareth</option>
+    </select>
+    <button id="testVoice">▶ Test voice</button>
+  </div>
+
+  <div class="row" id="browserControls">
     <span class="small">Voice</span>
     <select id="voice" style="max-width: 320px"></select>
     <span class="small">Rate</span>
@@ -84,6 +97,8 @@
     <span class="small" id="chunkpos"></span>
   </div>
 
+  <audio id="audioPlayer" controls hidden style="width:100%; margin-top:10px"></audio>
+
   <progress id="prog" indeterminate></progress>
   <div id="status"></div>
   <div id="scriptBox"></div>
@@ -95,6 +110,42 @@ let attached = null;          // File object
 let chunks = [];              // speakable sentences
 let chunkIdx = 0;
 let voices = [];
+let ttsChunks = [];
+let ttsChunkIdx = 0;
+let preparedScript = "";
+let audioUrl = null;
+let pendingAudioBlob = null;
+let playbackGeneration = 0;
+let previewMode = false;
+let paused = false;
+
+function updateEngineUI() {
+  const heygen = $("engine").value === "heygen";
+  $("ttsVoiceLabel").style.display = heygen ? "inline" : "none";
+  $("ttsVoice").style.display = heygen ? "inline-block" : "none";
+  $("testVoice").style.display = heygen ? "inline-block" : "none";
+  $("browserControls").style.display = heygen ? "none" : "flex";
+  $("audioPlayer").hidden = !heygen || !$("audioPlayer").src;
+}
+
+async function loadTtsConfig() {
+  try {
+    const response = await fetch("/api/tts-config");
+    if (!response.ok) return;
+    const config = await response.json();
+    if (!Array.isArray(config.voices) || !config.voices.length) return;
+    const select = $("ttsVoice");
+    select.innerHTML = "";
+    for (const voice of config.voices) {
+      const option = document.createElement("option");
+      option.value = voice;
+      option.textContent = voice.charAt(0).toUpperCase() + voice.slice(1);
+      select.appendChild(option);
+    }
+    select.value = config.voice || "gareth";
+  } catch {
+  }
+}
 
 // ---------------- voices ----------------
 function loadVoices() {
@@ -117,6 +168,13 @@ function loadVoices() {
 }
 speechSynthesis.onvoiceschanged = loadVoices;
 loadVoices();
+loadTtsConfig();
+updateEngineUI();
+
+$("engine").onchange = () => {
+  stopSpeech();
+  updateEngineUI();
+};
 
 $("rate").oninput = () => $("rateval").textContent = Number($("rate").value).toFixed(1) + "×";
 
@@ -175,10 +233,19 @@ $("go").onclick = async () => {
 
     $("scriptBox").style.display = "block";
     $("scriptBox").textContent = j.script;
+    preparedScript = j.script;
     chunks = splitSentences(j.script);
+    ttsChunks = splitTtsText(j.script);
     chunkIdx = 0;
-    setStatus(`Speaking ${chunks.length} chunks (${j.model}).`);
-    speakFrom(0);
+    ttsChunkIdx = 0;
+    paused = false;
+    if ($("engine").value === "heygen") {
+      setStatus(`Preparing ${ttsChunks.length} audio chunk(s) with HeyGen.`);
+      playTtsFrom(0);
+    } else {
+      setStatus(`Speaking ${chunks.length} chunks (${j.model}).`);
+      speakFrom(0);
+    }
   } catch (err) {
     setStatus("Error: " + err.message, true);
   } finally {
@@ -208,34 +275,200 @@ function currentVoice() {
   return voices.find(v => v.name === $("voice").value) || null;
 }
 
+function splitTtsText(text) {
+  const words = text.match(/\S+/g) || [];
+  const result = [];
+  let current = "";
+  for (const word of words) {
+    for (let offset = 0; offset < word.length; offset += 4500) {
+      const part = word.slice(offset, offset + 4500);
+      if (current && current.length + part.length + 1 > 4500) {
+        result.push(current);
+        current = "";
+      }
+      current = current ? current + " " + part : part;
+      if (offset + 4500 < word.length) {
+        result.push(current);
+        current = "";
+      }
+    }
+  }
+  if (current) result.push(current);
+  return result;
+}
+
+async function requestTts(text, voice) {
+  const response = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text, voice }),
+  });
+  if (!response.ok) {
+    let message = "HTTP " + response.status;
+    try { message = (await response.json()).error || message; } catch {}
+    throw new Error(message);
+  }
+  return response.blob();
+}
+
+function setAudioBlob(blob) {
+  const player = $("audioPlayer");
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = URL.createObjectURL(blob);
+  player.src = audioUrl;
+  player.hidden = false;
+}
+
+async function startAudio(blob, generation, isPreview) {
+  setAudioBlob(blob);
+  const player = $("audioPlayer");
+  player.onended = () => {
+    if (isPreview) {
+      setStatus("Voice preview complete.");
+    } else if (!paused && generation === playbackGeneration) {
+      playTtsFrom(ttsChunkIdx + 1, generation);
+    }
+  };
+  await player.play();
+}
+
+async function playTtsFrom(index, generation = playbackGeneration) {
+  if (index >= ttsChunks.length) {
+    setStatus("HeyGen playback complete.");
+    return;
+  }
+  ttsChunkIdx = index;
+  chunkPos();
+  try {
+    setStatus(`Generating HeyGen audio (${index + 1}/${ttsChunks.length})…`);
+    const blob = await requestTts(ttsChunks[index], $("ttsVoice").value || "gareth");
+    if (generation !== playbackGeneration) return;
+    if (paused) {
+      pendingAudioBlob = blob;
+      return;
+    }
+    await startAudio(blob, generation, false);
+    setStatus(`Playing HeyGen audio (${index + 1}/${ttsChunks.length}).`);
+  } catch (error) {
+    if (generation !== playbackGeneration) return;
+    if (previewMode) {
+      setStatus("Voice test failed: " + error.message, true);
+      return;
+    }
+    $("engine").value = "browser";
+    updateEngineUI();
+    chunks = splitSentences(preparedScript);
+    setStatus("HeyGen failed; falling back to browser speech: " + error.message, true);
+    speakFrom(0);
+  }
+}
+
 function speakFrom(i) {
   if (i >= chunks.length) { chunkPos(); return; }
   chunkIdx = i;
   chunkPos();
-  const u = new SpeechSynthesisUtterance(chunks[i]);
-  const v = currentVoice();
-  if (v) { u.voice = v; u.lang = v.lang; }
-  u.rate = Number($("rate").value);
-  u.pitch = Number($("pitch").value);
-  u.onend = () => { if (!paused) speakFrom(chunkIdx + 1); };
-  u.onerror = (e) => { if (e.error !== "interrupted" && e.error !== "canceled")
-                        setStatus("Speech error: " + e.error, true); };
-  speechSynthesis.speak(u);
+  const utterance = new SpeechSynthesisUtterance(chunks[i]);
+  const voice = currentVoice();
+  if (voice) { utterance.voice = voice; utterance.lang = voice.lang; }
+  utterance.rate = Number($("rate").value);
+  utterance.pitch = Number($("pitch").value);
+  utterance.onend = () => { if (!paused) speakFrom(chunkIdx + 1); };
+  utterance.onerror = (event) => {
+    if (event.error !== "interrupted" && event.error !== "canceled")
+      setStatus("Speech error: " + event.error, true);
+  };
+  speechSynthesis.speak(utterance);
 }
 
-let paused = false;
-$("pause").onclick = () => { paused = true; speechSynthesis.pause(); };
-$("resume").onclick = () => {
-  if (paused) { paused = false; speechSynthesis.resume(); }
-  else speakFrom(chunkIdx);       // resume from current chunk head
+$("testVoice").onclick = async () => {
+  stopSpeech();
+  const generation = playbackGeneration;
+  previewMode = true;
+  $("testVoice").disabled = true;
+  setStatus("Generating voice preview…");
+  try {
+    const blob = await requestTts(
+      "Hello! This is a preview of the selected ReadAloud voice.",
+      $("ttsVoice").value || "gareth");
+    if (generation !== playbackGeneration) return;
+    await startAudio(blob, generation, true);
+    setStatus("Playing voice preview.");
+  } catch (error) {
+    if (generation === playbackGeneration) {
+      previewMode = false;
+      setStatus("Voice test failed: " + error.message, true);
+    }
+  } finally {
+    $("testVoice").disabled = false;
+  }
 };
-$("stop").onclick = () => { paused = false; stopSpeech(); };
-$("skipNext").onclick = () => { stopSpeech(); paused = false; speakFrom(Math.min(chunkIdx + 1, chunks.length - 1)); };
-$("skipPrev").onclick = () => { stopSpeech(); paused = false; speakFrom(Math.max(chunkIdx - 1, 0)); };
 
-function stopSpeech() { paused = false; speechSynthesis.cancel(); }
+$("pause").onclick = () => {
+  paused = true;
+  if ($("engine").value === "heygen") $("audioPlayer").pause();
+  else speechSynthesis.pause();
+};
+$("resume").onclick = () => {
+  if ($("engine").value === "heygen") {
+    paused = false;
+    if (pendingAudioBlob) {
+      const blob = pendingAudioBlob;
+      pendingAudioBlob = null;
+      startAudio(blob, playbackGeneration, previewMode).catch(error =>
+        setStatus("Audio playback failed: " + error.message, true));
+    } else if ($("audioPlayer").ended) {
+      playTtsFrom(ttsChunkIdx + 1);
+    } else if ($("audioPlayer").src) {
+      $("audioPlayer").play().catch(error =>
+        setStatus("Audio playback failed: " + error.message, true));
+    } else {
+      playTtsFrom(ttsChunkIdx);
+    }
+  } else if (paused) {
+    paused = false;
+    speechSynthesis.resume();
+  } else {
+    speakFrom(chunkIdx);
+  }
+};
+$("stop").onclick = stopSpeech;
+$("skipNext").onclick = () => {
+  const next = $("engine").value === "heygen"
+    ? Math.min(ttsChunkIdx + 1, ttsChunks.length - 1)
+    : Math.min(chunkIdx + 1, chunks.length - 1);
+  stopSpeech();
+  if ($("engine").value === "heygen") playTtsFrom(next);
+  else speakFrom(next);
+};
+$("skipPrev").onclick = () => {
+  const previous = $("engine").value === "heygen"
+    ? Math.max(ttsChunkIdx - 1, 0)
+    : Math.max(chunkIdx - 1, 0);
+  stopSpeech();
+  if ($("engine").value === "heygen") playTtsFrom(previous);
+  else speakFrom(previous);
+};
+
+function stopSpeech() {
+  paused = false;
+  previewMode = false;
+  pendingAudioBlob = null;
+  playbackGeneration += 1;
+  speechSynthesis.cancel();
+  const player = $("audioPlayer");
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  if (audioUrl) URL.revokeObjectURL(audioUrl);
+  audioUrl = null;
+  player.hidden = $("engine").value !== "heygen";
+}
+
 function chunkPos() {
-  $("chunkpos").textContent = chunks.length ? `${Math.min(chunkIdx+1, chunks.length)} / ${chunks.length}` : "";
+  const usingTts = $("engine").value === "heygen";
+  const total = usingTts ? ttsChunks.length : chunks.length;
+  const index = usingTts ? ttsChunkIdx : chunkIdx;
+  $("chunkpos").textContent = total ? `${Math.min(index + 1, total)} / ${total}` : "";
 }
 
 // Chrome bug: long speech stops after ~15s unless you nudge it
